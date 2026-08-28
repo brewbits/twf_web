@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Warehouse Inventory Lookup</title>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #1a1d24;
+    --panel-2: #22262f;
+    --border: #2e333d;
+    --text: #f1f3f6;
+    --text-dim: #9aa2ad;
+    --accent: #4f8cff;
+    --good: #2fbf71;
+    --bad: #ef4444;
+    --warn: #f5a524;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 16px;
+  }
+  .wrap { width: 100%; max-width: 640px; }
+
+  h1 {
+    font-size: 1.25rem;
+    margin: 4px 0 14px;
+    text-align: center;
+    font-weight: 600;
+  }
+
+  .status-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-bottom: 14px;
+  }
+  .status-bar button {
+    background: none; border: 1px solid var(--border); color: var(--text-dim);
+    border-radius: 6px; padding: 4px 8px; font-size: 0.75rem; cursor: pointer;
+  }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .status-dot.ok { background: var(--good); }
+  .status-dot.bad { background: var(--bad); }
+  .status-dot.loading { background: var(--warn); }
+
+  .scan-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .scan-panel label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  #scanInput {
+    width: 100%;
+    font-size: 1.4rem;
+    padding: 14px 14px;
+    border-radius: 10px;
+    border: 2px solid var(--accent);
+    background: var(--panel-2);
+    color: var(--text);
+    outline: none;
+  }
+  #scanInput:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,140,255,0.25); }
+
+  .row-buttons { display: flex; gap: 10px; margin-top: 12px; }
+  .btn {
+    flex: 1;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .btn:active { transform: scale(0.98); }
+
+  #cameraPanel {
+    display: none;
+    margin-top: 12px;
+    border-radius: 10px;
+    overflow: hidden;
+    position: relative;
+    background: #000;
+  }
+  #cameraPanel.active { display: block; }
+  #video { width: 100%; display: block; max-height: 360px; object-fit: cover; }
+  .camera-hint {
+    position: absolute; bottom: 8px; left: 0; right: 0;
+    text-align: center; font-size: 0.75rem; color: #fff;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+  }
+
+  #result { min-height: 40px; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px;
+    margin-bottom: 14px;
+  }
+  .card.item { border-left: 4px solid var(--accent); }
+  .card.location { border-left: 4px solid var(--good); }
+  .card.notfound { border-left: 4px solid var(--bad); }
+
+  .card h2 {
+    margin: 0 0 4px;
+    font-size: 1.1rem;
+  }
+  .card .sub {
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    margin-bottom: 12px;
+  }
+  .kv { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 0.95rem; }
+  .kv:last-child { border-bottom: none; }
+  .kv .k { color: var(--text-dim); }
+  .kv .v { font-weight: 600; text-align: right; }
+  .kv .v.unassigned { color: var(--warn); font-weight: 400; }
+
+  .item-list { margin-top: 4px; }
+  .item-row {
+    display: flex; justify-content: space-between; gap: 10px;
+    padding: 10px 0; border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  .item-row:last-child { border-bottom: none; }
+  .item-row .name { flex: 1; }
+  .item-row .shelf-tag {
+    font-size: 0.7rem; color: var(--text-dim); background: var(--panel-2);
+    border-radius: 6px; padding: 1px 6px; margin-left: 6px;
+  }
+  .item-row .qty { color: var(--text-dim); white-space: nowrap; }
+  .empty-note { color: var(--text-dim); font-size: 0.9rem; }
+
+  .footer-note { text-align: center; color: var(--text-dim); font-size: 0.75rem; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Warehouse Inventory Lookup</h1>
+
+  <div class="status-bar">
+    <span id="statusText"><span class="status-dot loading"></span>Loading inventory…</span>
+    <button id="refreshBtn">Refresh</button>
+  </div>
+
+  <div class="scan-panel">
+    <label for="scanInput">Scan or type a code, then press Enter</label>
+    <input id="scanInput" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="e.g. SHCK4T0150 or PER-A-R04">
+    <div class="row-buttons">
+      <button class="btn primary" id="lookupBtn">Look up</button>
+      <button class="btn" id="cameraBtn">Scan with camera</button>
+    </div>
+    <div id="cameraPanel">
+      <video id="video" muted playsinline></video>
+      <div class="camera-hint">Point the camera at a QR code</div>
+    </div>
+  </div>
+
+  <div id="result"></div>
+  <div class="footer-note">Data source: brewbits/twf · inventory_full.xlsx</div>
+</div>
+
+<canvas id="canvas" style="display:none"></canvas>
+
+<script>
+const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
+
+const COL = {
+  name: "Entry Name",
+  type: "Entry Type",
+  sid: "SID",
+  qty: "Quantity",
+  unit: "Unit",
+  notes: "Notes",
+  rack: "Pick - Rack",
+  shelf: "Pick - Shelf",
+};
+
+let rows = [];
+let sidIndex = new Map();     // SID (upper) -> row, Entry Type = Item
+let bayIndex = new Map();     // BAY (upper) -> [rows]
+let bayShelfIndex = new Map(); // BAY|SHELF (upper) -> [rows]
+
+const statusText = document.getElementById('statusText');
+const resultEl = document.getElementById('result');
+const scanInput = document.getElementById('scanInput');
+
+function setStatus(kind, text) {
+  const dotClass = kind === 'ok' ? 'ok' : kind === 'error' ? 'bad' : 'loading';
+  statusText.innerHTML = `<span class="status-dot ${dotClass}"></span>${text}`;
+}
+
+function isAssigned(v) {
+  if (v === undefined || v === null) return false;
+  const s = String(v).trim();
+  if (!s) return false;
+  return s.toUpperCase() !== 'NOT ASSIGNED';
+}
+
+async function loadData() {
+  setStatus('loading', 'Loading inventory…');
+  try {
+    const resp = await fetch(DATA_URL, { cache: 'no-store' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const buf = await resp.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+
+    sidIndex = new Map();
+    bayIndex = new Map();
+    bayShelfIndex = new Map();
+
+    for (const r of rows) {
+      const sid = String(r[COL.sid] || '').trim();
+      const type = String(r[COL.type] || '').trim();
+      const rack = String(r[COL.rack] || '').trim();
+      const shelf = String(r[COL.shelf] || '').trim();
+
+      if (sid && type === 'Item') {
+        sidIndex.set(sid.toUpperCase(), r);
+      }
+      if (isAssigned(rack)) {
+        const rackKey = rack.toUpperCase();
+        if (!bayIndex.has(rackKey)) bayIndex.set(rackKey, []);
+        bayIndex.get(rackKey).push(r);
+
+        if (isAssigned(shelf)) {
+          const combo = rackKey + '|' + shelf.toUpperCase();
+          if (!bayShelfIndex.has(combo)) bayShelfIndex.set(combo, []);
+          bayShelfIndex.get(combo).push(r);
+        }
+      }
+    }
+
+    const now = new Date().toLocaleTimeString();
+    setStatus('ok', `Loaded ${rows.length} rows · ${now}`);
+  } catch (err) {
+    console.error(err);
+    setStatus('error', 'Failed to load inventory data (' + err.message + ')');
+  }
+}
+
+function renderNotFound(code) {
+  resultEl.innerHTML = `
+    <div class="card notfound">
+      <h2>Not found</h2>
+      <div class="sub">No item or location matches this code.</div>
+      <div class="kv"><span class="k">Scanned text</span><span class="v">${escapeHtml(code)}</span></div>
+    </div>`;
+}
+
+function renderItem(r) {
+  const rack = String(r[COL.rack] || '').trim();
+  const shelf = String(r[COL.shelf] || '').trim();
+  const rackAssigned = isAssigned(rack);
+  const shelfAssigned = isAssigned(shelf);
+
+  resultEl.innerHTML = `
+    <div class="card item">
+      <h2>${escapeHtml(String(r[COL.name] || '(unnamed item)'))}</h2>
+      <div class="sub">SID ${escapeHtml(String(r[COL.sid] || ''))}</div>
+      <div class="kv"><span class="k">Rack</span><span class="v ${rackAssigned ? '' : 'unassigned'}">${rackAssigned ? escapeHtml(rack) : 'Not assigned'}</span></div>
+      <div class="kv"><span class="k">Shelf</span><span class="v ${shelfAssigned ? '' : 'unassigned'}">${shelfAssigned ? escapeHtml(shelf) : 'Not assigned'}</span></div>
+      <div class="kv"><span class="k">Quantity</span><span class="v">${escapeHtml(String(r[COL.qty] ?? ''))} ${escapeHtml(String(r[COL.unit] || ''))}</span></div>
+      ${r[COL.notes] ? `<div class="kv"><span class="k">Notes</span><span class="v">${escapeHtml(String(r[COL.notes]))}</span></div>` : ''}
+    </div>`;
+}
+
+function renderLocation(title, subtitle, items) {
+  let body;
+  if (!items || items.length === 0) {
+    body = `<div class="empty-note">No items currently recorded at this location.</div>`;
+  } else {
+    body = `<div class="item-list">` + items.map(r => `
+      <div class="item-row">
+        <span class="name">${escapeHtml(String(r[COL.name] || ''))}${
+          subtitle === 'ALL_SHELVES' && isAssigned(r[COL.shelf])
+            ? `<span class="shelf-tag">Shelf ${escapeHtml(String(r[COL.shelf]))}</span>` : ''
+        }</span>
+        <span class="qty">${escapeHtml(String(r[COL.qty] ?? ''))} ${escapeHtml(String(r[COL.unit] || ''))}</span>
+      </div>`).join('') + `</div>`;
+  }
+
+  resultEl.innerHTML = `
+    <div class="card location">
+      <h2>${escapeHtml(title)}</h2>
+      <div class="sub">${items.length} item${items.length === 1 ? '' : 's'}</div>
+      ${body}
+    </div>`;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+function handleScan(raw) {
+  const code = String(raw || '').trim();
+  if (!code) return;
+  const upper = code.toUpperCase();
+
+  // 1. Item lookup by SID
+  if (sidIndex.has(upper)) {
+    renderItem(sidIndex.get(upper));
+    return;
+  }
+
+  // 2. Bay + shelf combined code, e.g. PER-A-R04-01 (split on last "-NN")
+  const shelfSplit = upper.match(/^(.+)-(\d{2})$/);
+  if (shelfSplit) {
+    const bayPart = shelfSplit[1];
+    const shelfPart = shelfSplit[2];
+    const combo = bayPart + '|' + shelfPart;
+    if (bayShelfIndex.has(combo)) {
+      renderLocation(`Rack ${bayPart}, Shelf ${shelfPart}`, 'ONE_SHELF', bayShelfIndex.get(combo));
+      return;
+    }
+  }
+
+  // 3. Bay only, e.g. PER-A-R04
+  if (bayIndex.has(upper)) {
+    renderLocation(`Rack ${upper} (all shelves)`, 'ALL_SHELVES', bayIndex.get(upper));
+    return;
+  }
+
+  // 4. Nothing matched
+  renderNotFound(code);
+}
+
+// ---- scan input wiring ----
+scanInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    handleScan(scanInput.value);
+    scanInput.value = '';
+  }
+});
+document.getElementById('lookupBtn').addEventListener('click', () => {
+  handleScan(scanInput.value);
+  scanInput.value = '';
+  scanInput.focus();
+});
+document.getElementById('refreshBtn').addEventListener('click', loadData);
+
+function refocusInput() {
+  // Don't steal focus while the camera panel is open or user is scrolling a result.
+  if (document.getElementById('cameraPanel').classList.contains('active')) return;
+  scanInput.focus();
+}
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#cameraPanel')) return;
+  refocusInput();
+});
+window.addEventListener('load', refocusInput);
+
+// ---- camera scanning ----
+const cameraBtn = document.getElementById('cameraBtn');
+const cameraPanel = document.getElementById('cameraPanel');
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+let stream = null;
+let scanning = false;
+let detector = null;
+if ('BarcodeDetector' in window) {
+  try { detector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { detector = null; }
+}
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+  } catch (err) {
+    alert('Camera access failed: ' + err.message);
+    return;
+  }
+  video.srcObject = stream;
+  await video.play();
+  cameraPanel.classList.add('active');
+  scanning = true;
+  requestAnimationFrame(scanFrame);
+}
+
+function stopCamera() {
+  scanning = false;
+  cameraPanel.classList.remove('active');
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+  refocusInput();
+}
+
+async function scanFrame() {
+  if (!scanning) return;
+  if (video.readyState === video.HAVE_ENOUGH_DATA) {
+    try {
+      if (detector) {
+        const codes = await detector.detect(video);
+        if (codes.length > 0) {
+          onCameraResult(codes[0].rawValue);
+          return;
+        }
+      } else if (window.jsQR) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code && code.data) {
+          onCameraResult(code.data);
+          return;
+        }
+      }
+    } catch (e) { /* keep scanning */ }
+  }
+  requestAnimationFrame(scanFrame);
+}
+
+function onCameraResult(text) {
+  stopCamera();
+  handleScan(text);
+}
+
+cameraBtn.addEventListener('click', () => {
+  if (cameraPanel.classList.contains('active')) {
+    stopCamera();
+  } else {
+    startCamera();
+  }
+});
+
+loadData();
+</script>
+</body>
+</html>
