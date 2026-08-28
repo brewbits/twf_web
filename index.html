@@ -81,6 +81,32 @@
     padding: 16px;
     margin-bottom: 14px;
   }
+
+  .search-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .search-panel label {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+  }
+  #searchInput {
+    width: 100%;
+    font-size: 1rem;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    outline: none;
+  }
+  #searchInput:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,140,255,0.25); }
   .scan-panel label {
     display: block;
     font-size: 0.8rem;
@@ -189,7 +215,19 @@
     border-radius: 6px; padding: 1px 6px; margin-left: 6px;
   }
   .item-row .qty { color: var(--text-dim); white-space: nowrap; }
+  .item-row.clickable { cursor: pointer; }
+  .item-row.clickable:active { background: var(--panel-2); }
   .empty-note { color: var(--text-dim); font-size: 0.9rem; }
+  .search-note { color: var(--text-dim); font-size: 0.8rem; margin-top: 10px; }
+  .back-link {
+    display: inline-block;
+    color: var(--accent);
+    font-size: 0.85rem;
+    margin-bottom: 12px;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .back-link:active { opacity: 0.7; }
 
   .footer-note { text-align: center; color: var(--text-dim); font-size: 0.75rem; margin-top: 8px; }
 </style>
@@ -216,6 +254,12 @@
     </div>
   </div>
 
+  <div class="search-panel">
+    <label for="searchInput">Search by name, description, part number, or SID</label>
+    <input id="searchInput" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. post beam, baseplate, 4T0150">
+    <button class="btn primary" id="searchBtn">Search</button>
+  </div>
+
   <div id="result"></div>
   <div class="footer-note" id="footerNote">Data source: brewbits/twf · inventory_full.xlsx</div>
 </div>
@@ -223,7 +267,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.6";
+const APP_VERSION = "0.8";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -241,7 +285,12 @@ const COL = {
   sub4: "Subfolder-level4",
   rack: "Pick - Rack",
   shelf: "Pick - Shelf",
+  modelPart: "Model/Part Number",
 };
+
+const SEARCH_FIELDS = [COL.name, COL.description, COL.modelPart, COL.sid];
+const SEARCH_MIN_CHARS = 2;
+const SEARCH_RESULT_CAP = 30;
 
 function folderBreadcrumb(r) {
   const parts = [COL.primaryFolder, COL.sub1, COL.sub2, COL.sub3, COL.sub4]
@@ -337,7 +386,7 @@ function renderNotFound(code) {
     </div>`;
 }
 
-function renderItem(records) {
+function renderItem(records, opts = {}) {
   // The same SID can legitimately appear as more than one stock record
   // (e.g. the same item held in both Perth and Bunbury warehouses), so this
   // always renders a list of one-or-more location blocks, never assumes one.
@@ -373,13 +422,22 @@ function renderItem(records) {
       </div>`;
   }).join('<hr class="loc-divider">');
 
+  const backLink = opts.fromSearch
+    ? `<a class="back-link" id="backToSearchLink">&larr; Back to search results</a>`
+    : '';
+
   resultEl.innerHTML = `
+    ${backLink}
     <div class="card item">
       <h2>${escapeHtml(name)}</h2>
       <div class="sub">SID ${escapeHtml(sid)}${records.length > 1 ? ` · ${records.length} stock locations · total ${totalQty} ${escapeHtml(unit)}` : ''}</div>
       ${sharedDescription ? `<div class="description">${escapeHtml(sharedDescription)}</div>` : ''}
       ${locationsHtml}
     </div>`;
+
+  if (opts.fromSearch) {
+    document.getElementById('backToSearchLink').addEventListener('click', renderSearchResults);
+  }
 }
 
 function renderLocation(title, subtitle, items) {
@@ -458,6 +516,93 @@ function handleScan(raw) {
   renderNotFound(code);
 }
 
+// ---- free-text search ----
+let lastSearchState = null; // { query, matchedSids: [...] } or null when no active search
+
+function performSearch(rawQuery) {
+  const query = rawQuery.trim();
+  if (query.length < SEARCH_MIN_CHARS) {
+    lastSearchState = null;
+    resultEl.innerHTML = `<div class="empty-note">Type at least ${SEARCH_MIN_CHARS} characters to search.</div>`;
+    return;
+  }
+
+  // Multi-word queries don't require the exact phrase: every word must
+  // appear SOMEWHERE across the combined searchable fields, in any order
+  // and even in different fields - "beam aluminum" and "aluminum beam"
+  // match the same items, and a word in the description can pair with a
+  // word only found in the name. A single-word query behaves exactly like
+  // before (a plain substring match).
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const matchedSids = [];
+  const seen = new Set();
+  for (const r of rows) {
+    const haystack = SEARCH_FIELDS.map(field => String(r[field] || '')).join(' ').toLowerCase();
+    const hit = words.every(w => haystack.includes(w));
+    if (!hit) continue;
+    const sidKey = String(r[COL.sid] || '').trim().toUpperCase();
+    if (sidKey && !seen.has(sidKey)) {
+      seen.add(sidKey);
+      matchedSids.push(sidKey);
+    }
+  }
+
+  lastSearchState = { query, matchedSids };
+  renderSearchResults();
+}
+
+function renderSearchResults() {
+  if (!lastSearchState) return;
+  const { query, matchedSids } = lastSearchState;
+
+  if (matchedSids.length === 0) {
+    resultEl.innerHTML = `<div class="empty-note">No items match "${escapeHtml(query)}".</div>`;
+    return;
+  }
+
+  const shown = matchedSids.slice(0, SEARCH_RESULT_CAP);
+  const rowsHtml = shown.map(sidKey => {
+    const records = sidIndex.get(sidKey) || [];
+    const first = records[0];
+    if (!first) return '';
+    const name = String(first[COL.name] || '(unnamed item)');
+    const totalQty = records.reduce((sum, r) => {
+      const n = Number(r[COL.qty]);
+      return sum + (Number.isFinite(n) ? n : 0);
+    }, 0);
+    const unit = String(first[COL.unit] || '');
+    const breadcrumb = folderBreadcrumb(first);
+
+    return `
+      <div class="item-row clickable" data-sid="${escapeHtml(sidKey)}">
+        <div class="name-col">
+          <span class="name">${escapeHtml(name)}</span>
+          <div class="breadcrumb small">SID ${escapeHtml(sidKey)}${records.length > 1 ? ` &middot; ${records.length} locations` : ''}${breadcrumb.length ? ` &middot; ${breadcrumb.map(escapeHtml).join(' &rsaquo; ')}` : ''}</div>
+        </div>
+        <span class="qty">${escapeHtml(String(totalQty))} ${escapeHtml(unit)}</span>
+      </div>`;
+  }).join('');
+
+  const cappedNote = matchedSids.length > SEARCH_RESULT_CAP
+    ? `<div class="search-note">Showing top ${SEARCH_RESULT_CAP} of ${matchedSids.length} matches - refine your search for a shorter list.</div>`
+    : '';
+
+  resultEl.innerHTML = `
+    <div class="card location">
+      <h2>Search results for "${escapeHtml(query)}"</h2>
+      <div class="sub">${matchedSids.length} item${matchedSids.length === 1 ? '' : 's'} found</div>
+      <div class="item-list">${rowsHtml}</div>
+      ${cappedNote}
+    </div>`;
+
+  resultEl.querySelectorAll('.item-row.clickable').forEach(el => {
+    el.addEventListener('click', () => {
+      const sidKey = el.getAttribute('data-sid');
+      renderItem(sidIndex.get(sidKey), { fromSearch: true });
+    });
+  });
+}
+
 // ---- scan input wiring ----
 // The scanned/typed text is left visible in the box after a lookup (not
 // cleared) so the user can confirm exactly what was captured - but with any
@@ -484,13 +629,28 @@ document.getElementById('lookupBtn').addEventListener('click', () => {
 });
 document.getElementById('refreshBtn').addEventListener('click', loadData);
 
+// ---- search input wiring ----
+const searchInput = document.getElementById('searchInput');
+document.getElementById('searchBtn').addEventListener('click', () => performSearch(searchInput.value));
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    performSearch(searchInput.value);
+  }
+});
+
 function refocusInput() {
   // Don't steal focus while the camera panel is open or user is scrolling a result.
   if (document.getElementById('cameraPanel').classList.contains('active')) return;
   scanInput.focus();
 }
 document.addEventListener('click', (e) => {
+  // Don't steal focus back to the scan box while the user is working with
+  // the camera panel or the separate search panel/results (typing a search,
+  // clicking a result row, clicking "Back to search results", etc.).
   if (e.target.closest('#cameraPanel')) return;
+  if (e.target.closest('.search-panel')) return;
+  if (e.target.closest('#result')) return;
   refocusInput();
 });
 window.addEventListener('load', refocusInput);
