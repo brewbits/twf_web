@@ -328,8 +328,18 @@ function escapeHtml(s) {
   return s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
 
+function extractCode(raw) {
+  // Some labels are scanned by apps (e.g. Sortly) that wrap the real code in
+  // their own URI, like "sy://o2/m_qrcode_single/SHCK4T0150". Our own codes
+  // (SIDs, rack/shelf codes) never contain "/", so if one shows up, the real
+  // code is whatever follows the last "/".
+  const trimmed = String(raw || '').trim();
+  const slashIdx = trimmed.lastIndexOf('/');
+  return slashIdx === -1 ? trimmed : trimmed.slice(slashIdx + 1);
+}
+
 function handleScan(raw) {
-  const code = String(raw || '').trim();
+  const code = extractCode(raw);
   if (!code) return;
   const upper = code.toUpperCase();
 
