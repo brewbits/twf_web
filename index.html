@@ -223,7 +223,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.5";
+const APP_VERSION = "0.6";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -460,18 +460,25 @@ function handleScan(raw) {
 
 // ---- scan input wiring ----
 // The scanned/typed text is left visible in the box after a lookup (not
-// cleared) so the user can confirm exactly what was captured. It's
-// select()ed instead, so the next scan's keystrokes - from the physical
-// scanner or the camera - simply replace it rather than appending to it.
+// cleared) so the user can confirm exactly what was captured - but with any
+// wrapper prefix (e.g. Sortly's "sy://o2/m_qrcode_single/") already
+// stripped via extractCode(), so what's shown matches what was matched
+// against, not raw scanner/app noise. It's select()ed rather than cleared,
+// so the next scan's keystrokes - from the physical scanner or the camera -
+// simply replace it rather than appending to it.
 scanInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
-    handleScan(scanInput.value);
+    const cleaned = extractCode(scanInput.value);
+    scanInput.value = cleaned;
+    handleScan(cleaned);
     scanInput.select();
   }
 });
 document.getElementById('lookupBtn').addEventListener('click', () => {
-  handleScan(scanInput.value);
+  const cleaned = extractCode(scanInput.value);
+  scanInput.value = cleaned;
+  handleScan(cleaned);
   scanInput.focus();
   scanInput.select();
 });
@@ -553,10 +560,11 @@ async function scanFrame() {
 
 function onCameraResult(text) {
   stopCamera();
-  // Show the raw decoded text in the box, same as a physical scanner would
-  // by typing it in directly, so the user can see exactly what was read.
-  scanInput.value = text;
-  handleScan(text);
+  // Show the cleaned code in the box (wrapper prefix stripped), matching
+  // what the lookup actually matched against - not raw scanner/app noise.
+  const cleaned = extractCode(text);
+  scanInput.value = cleaned;
+  handleScan(cleaned);
   scanInput.select();
 }
 
