@@ -223,7 +223,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.4";
+const APP_VERSION = "0.5";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -459,17 +459,21 @@ function handleScan(raw) {
 }
 
 // ---- scan input wiring ----
+// The scanned/typed text is left visible in the box after a lookup (not
+// cleared) so the user can confirm exactly what was captured. It's
+// select()ed instead, so the next scan's keystrokes - from the physical
+// scanner or the camera - simply replace it rather than appending to it.
 scanInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
     handleScan(scanInput.value);
-    scanInput.value = '';
+    scanInput.select();
   }
 });
 document.getElementById('lookupBtn').addEventListener('click', () => {
   handleScan(scanInput.value);
-  scanInput.value = '';
   scanInput.focus();
+  scanInput.select();
 });
 document.getElementById('refreshBtn').addEventListener('click', loadData);
 
@@ -549,7 +553,11 @@ async function scanFrame() {
 
 function onCameraResult(text) {
   stopCamera();
+  // Show the raw decoded text in the box, same as a physical scanner would
+  // by typing it in directly, so the user can see exactly what was read.
+  scanInput.value = text;
   handleScan(text);
+  scanInput.select();
 }
 
 cameraBtn.addEventListener('click', () => {
