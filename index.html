@@ -46,6 +46,13 @@
     text-align: center;
     font-weight: 600;
   }
+  .version-tag {
+    font-size: 0.65rem;
+    font-weight: 400;
+    color: var(--text-dim);
+    vertical-align: middle;
+    margin-left: 6px;
+  }
 
   .status-bar {
     display: flex; align-items: center; justify-content: space-between;
@@ -144,6 +151,20 @@
     font-size: 0.85rem;
     margin-bottom: 12px;
   }
+  .breadcrumb {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    margin-bottom: 10px;
+  }
+  .breadcrumb.small { margin-bottom: 0; margin-top: 2px; font-size: 0.72rem; }
+  .description {
+    font-size: 0.9rem;
+    color: var(--text);
+    background: var(--panel-2);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 12px;
+  }
   .kv { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 0.95rem; }
   .kv:last-child { border-bottom: none; }
   .kv .k { color: var(--text-dim); }
@@ -152,12 +173,12 @@
 
   .item-list { margin-top: 4px; }
   .item-row {
-    display: flex; justify-content: space-between; gap: 10px;
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;
     padding: 10px 0; border-bottom: 1px solid var(--border);
     font-size: 0.9rem;
   }
   .item-row:last-child { border-bottom: none; }
-  .item-row .name { flex: 1; }
+  .item-row .name-col { flex: 1; min-width: 0; }
   .item-row .shelf-tag {
     font-size: 0.7rem; color: var(--text-dim); background: var(--panel-2);
     border-radius: 6px; padding: 1px 6px; margin-left: 6px;
@@ -170,7 +191,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Warehouse Inventory Lookup</h1>
+  <h1>Warehouse Inventory Lookup<span class="version-tag" id="versionTag"></span></h1>
 
   <div class="status-bar">
     <span id="statusText"><span class="status-dot loading"></span>Loading inventory…</span>
@@ -191,24 +212,38 @@
   </div>
 
   <div id="result"></div>
-  <div class="footer-note">Data source: brewbits/twf · inventory_full.xlsx</div>
+  <div class="footer-note" id="footerNote">Data source: brewbits/twf · inventory_full.xlsx</div>
 </div>
 
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
+const APP_VERSION = "0.2";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
   name: "Entry Name",
-  type: "Entry Type",
+  type: "Entry Type",       // may be absent in newer exports - handled defensively below
   sid: "SID",
   qty: "Quantity",
   unit: "Unit",
   notes: "Notes",
+  description: "Add description here",
+  primaryFolder: "Primary Folder",
+  sub1: "Subfolder-level1",
+  sub2: "Subfolder-level2",
+  sub3: "Subfolder-level3",
+  sub4: "Subfolder-level4",
   rack: "Pick - Rack",
   shelf: "Pick - Shelf",
 };
+
+function folderBreadcrumb(r) {
+  const parts = [COL.primaryFolder, COL.sub1, COL.sub2, COL.sub3, COL.sub4]
+    .map(key => String(r[key] || '').trim())
+    .filter(v => v && v.toUpperCase() !== 'NOT ASSIGNED');
+  return parts;
+}
 
 let rows = [];
 let sidIndex = new Map();     // SID (upper) -> row, Entry Type = Item
@@ -247,11 +282,15 @@ async function loadData() {
 
     for (const r of rows) {
       const sid = String(r[COL.sid] || '').trim();
-      const type = String(r[COL.type] || '').trim();
+      const rawType = r[COL.type];
+      // Older exports had an "Entry Type" column distinguishing Item/Folder rows.
+      // Newer exports omit it entirely (every row is an item) - only exclude a
+      // row when that column is present AND explicitly says "Folder".
+      const isFolder = rawType !== undefined && String(rawType).trim() === 'Folder';
       const rack = String(r[COL.rack] || '').trim();
       const shelf = String(r[COL.shelf] || '').trim();
 
-      if (sid && type === 'Item') {
+      if (sid && !isFolder) {
         sidIndex.set(sid.toUpperCase(), r);
       }
       if (isAssigned(rack)) {
@@ -289,11 +328,15 @@ function renderItem(r) {
   const shelf = String(r[COL.shelf] || '').trim();
   const rackAssigned = isAssigned(rack);
   const shelfAssigned = isAssigned(shelf);
+  const breadcrumb = folderBreadcrumb(r);
+  const description = String(r[COL.description] || '').trim();
 
   resultEl.innerHTML = `
     <div class="card item">
       <h2>${escapeHtml(String(r[COL.name] || '(unnamed item)'))}</h2>
       <div class="sub">SID ${escapeHtml(String(r[COL.sid] || ''))}</div>
+      ${breadcrumb.length ? `<div class="breadcrumb">${breadcrumb.map(escapeHtml).join(' &rsaquo; ')}</div>` : ''}
+      ${description ? `<div class="description">${escapeHtml(description)}</div>` : ''}
       <div class="kv"><span class="k">Rack</span><span class="v ${rackAssigned ? '' : 'unassigned'}">${rackAssigned ? escapeHtml(rack) : 'Not assigned'}</span></div>
       <div class="kv"><span class="k">Shelf</span><span class="v ${shelfAssigned ? '' : 'unassigned'}">${shelfAssigned ? escapeHtml(shelf) : 'Not assigned'}</span></div>
       <div class="kv"><span class="k">Quantity</span><span class="v">${escapeHtml(String(r[COL.qty] ?? ''))} ${escapeHtml(String(r[COL.unit] || ''))}</span></div>
@@ -306,14 +349,20 @@ function renderLocation(title, subtitle, items) {
   if (!items || items.length === 0) {
     body = `<div class="empty-note">No items currently recorded at this location.</div>`;
   } else {
-    body = `<div class="item-list">` + items.map(r => `
+    body = `<div class="item-list">` + items.map(r => {
+      const breadcrumb = folderBreadcrumb(r);
+      return `
       <div class="item-row">
-        <span class="name">${escapeHtml(String(r[COL.name] || ''))}${
-          subtitle === 'ALL_SHELVES' && isAssigned(r[COL.shelf])
-            ? `<span class="shelf-tag">Shelf ${escapeHtml(String(r[COL.shelf]))}</span>` : ''
-        }</span>
+        <div class="name-col">
+          <span class="name">${escapeHtml(String(r[COL.name] || ''))}${
+            subtitle === 'ALL_SHELVES' && isAssigned(r[COL.shelf])
+              ? `<span class="shelf-tag">Shelf ${escapeHtml(String(r[COL.shelf]))}</span>` : ''
+          }</span>
+          ${breadcrumb.length ? `<div class="breadcrumb small">${breadcrumb.map(escapeHtml).join(' &rsaquo; ')}</div>` : ''}
+        </div>
         <span class="qty">${escapeHtml(String(r[COL.qty] ?? ''))} ${escapeHtml(String(r[COL.unit] || ''))}</span>
-      </div>`).join('') + `</div>`;
+      </div>`;
+    }).join('') + `</div>`;
   }
 
   resultEl.innerHTML = `
@@ -472,6 +521,9 @@ cameraBtn.addEventListener('click', () => {
     startCamera();
   }
 });
+
+document.getElementById('versionTag').textContent = `v${APP_VERSION}`;
+document.getElementById('footerNote').textContent = `v${APP_VERSION} · Data source: brewbits/twf · inventory_full.xlsx`;
 
 loadData();
 </script>
