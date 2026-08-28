@@ -165,6 +165,11 @@
     padding: 8px 10px;
     margin-bottom: 12px;
   }
+  .loc-divider {
+    border: none;
+    border-top: 1px dashed var(--border);
+    margin: 14px 0;
+  }
   .kv { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 0.95rem; }
   .kv:last-child { border-bottom: none; }
   .kv .k { color: var(--text-dim); }
@@ -218,7 +223,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.2";
+const APP_VERSION = "0.4";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -269,7 +274,11 @@ function isAssigned(v) {
 async function loadData() {
   setStatus('loading', 'Loading inventory…');
   try {
-    const resp = await fetch(DATA_URL, { cache: 'no-store' });
+    // raw.githubusercontent.com sits behind a CDN that caches content for a
+    // few minutes at the edge, independent of the browser's own cache - a
+    // cache-busting query param forces a fresh fetch from origin every time
+    // rather than occasionally serving a stale file right after an upload.
+    const resp = await fetch(DATA_URL + '?t=' + Date.now(), { cache: 'no-store' });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const buf = await resp.arrayBuffer();
     const wb = XLSX.read(buf, { type: 'array' });
@@ -291,7 +300,12 @@ async function loadData() {
       const shelf = String(r[COL.shelf] || '').trim();
 
       if (sid && !isFolder) {
-        sidIndex.set(sid.toUpperCase(), r);
+        // The same SID legitimately appears more than once - Sortly tracks
+        // it as a separate stock record per warehouse/location - so this
+        // must accumulate every matching row, not overwrite to just one.
+        const sidKey = sid.toUpperCase();
+        if (!sidIndex.has(sidKey)) sidIndex.set(sidKey, []);
+        sidIndex.get(sidKey).push(r);
       }
       if (isAssigned(rack)) {
         const rackKey = rack.toUpperCase();
@@ -323,24 +337,48 @@ function renderNotFound(code) {
     </div>`;
 }
 
-function renderItem(r) {
-  const rack = String(r[COL.rack] || '').trim();
-  const shelf = String(r[COL.shelf] || '').trim();
-  const rackAssigned = isAssigned(rack);
-  const shelfAssigned = isAssigned(shelf);
-  const breadcrumb = folderBreadcrumb(r);
-  const description = String(r[COL.description] || '').trim();
+function renderItem(records) {
+  // The same SID can legitimately appear as more than one stock record
+  // (e.g. the same item held in both Perth and Bunbury warehouses), so this
+  // always renders a list of one-or-more location blocks, never assumes one.
+  const first = records[0];
+  const name = String(first[COL.name] || '(unnamed item)');
+  const sid = String(first[COL.sid] || '');
+  const unit = String(first[COL.unit] || '');
+
+  const descriptions = [...new Set(records.map(r => String(r[COL.description] || '').trim()).filter(Boolean))];
+  const sharedDescription = descriptions.length === 1 ? descriptions[0] : null;
+
+  const totalQty = records.reduce((sum, r) => {
+    const n = Number(r[COL.qty]);
+    return sum + (Number.isFinite(n) ? n : 0);
+  }, 0);
+
+  const locationsHtml = records.map(r => {
+    const rack = String(r[COL.rack] || '').trim();
+    const shelf = String(r[COL.shelf] || '').trim();
+    const rackAssigned = isAssigned(rack);
+    const shelfAssigned = isAssigned(shelf);
+    const breadcrumb = folderBreadcrumb(r);
+    const rowDescription = sharedDescription === null ? String(r[COL.description] || '').trim() : '';
+
+    return `
+      <div class="loc-block">
+        ${breadcrumb.length ? `<div class="breadcrumb">${breadcrumb.map(escapeHtml).join(' &rsaquo; ')}</div>` : ''}
+        ${rowDescription ? `<div class="description">${escapeHtml(rowDescription)}</div>` : ''}
+        <div class="kv"><span class="k">Rack</span><span class="v ${rackAssigned ? '' : 'unassigned'}">${rackAssigned ? escapeHtml(rack) : 'Not assigned'}</span></div>
+        <div class="kv"><span class="k">Shelf</span><span class="v ${shelfAssigned ? '' : 'unassigned'}">${shelfAssigned ? escapeHtml(shelf) : 'Not assigned'}</span></div>
+        <div class="kv"><span class="k">Quantity</span><span class="v">${escapeHtml(String(r[COL.qty] ?? ''))} ${escapeHtml(unit)}</span></div>
+        ${r[COL.notes] ? `<div class="kv"><span class="k">Notes</span><span class="v">${escapeHtml(String(r[COL.notes]))}</span></div>` : ''}
+      </div>`;
+  }).join('<hr class="loc-divider">');
 
   resultEl.innerHTML = `
     <div class="card item">
-      <h2>${escapeHtml(String(r[COL.name] || '(unnamed item)'))}</h2>
-      <div class="sub">SID ${escapeHtml(String(r[COL.sid] || ''))}</div>
-      ${breadcrumb.length ? `<div class="breadcrumb">${breadcrumb.map(escapeHtml).join(' &rsaquo; ')}</div>` : ''}
-      ${description ? `<div class="description">${escapeHtml(description)}</div>` : ''}
-      <div class="kv"><span class="k">Rack</span><span class="v ${rackAssigned ? '' : 'unassigned'}">${rackAssigned ? escapeHtml(rack) : 'Not assigned'}</span></div>
-      <div class="kv"><span class="k">Shelf</span><span class="v ${shelfAssigned ? '' : 'unassigned'}">${shelfAssigned ? escapeHtml(shelf) : 'Not assigned'}</span></div>
-      <div class="kv"><span class="k">Quantity</span><span class="v">${escapeHtml(String(r[COL.qty] ?? ''))} ${escapeHtml(String(r[COL.unit] || ''))}</span></div>
-      ${r[COL.notes] ? `<div class="kv"><span class="k">Notes</span><span class="v">${escapeHtml(String(r[COL.notes]))}</span></div>` : ''}
+      <h2>${escapeHtml(name)}</h2>
+      <div class="sub">SID ${escapeHtml(sid)}${records.length > 1 ? ` · ${records.length} stock locations · total ${totalQty} ${escapeHtml(unit)}` : ''}</div>
+      ${sharedDescription ? `<div class="description">${escapeHtml(sharedDescription)}</div>` : ''}
+      ${locationsHtml}
     </div>`;
 }
 
