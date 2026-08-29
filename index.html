@@ -236,8 +236,15 @@
     color: var(--text-dim);
     font-size: 0.78rem;
     margin: -6px 0 14px;
+    border-radius: 8px;
   }
-  .file-age.stale { color: var(--warn); }
+  .file-age.stale {
+    background: #facc15;
+    color: #111;
+    font-weight: 600;
+    padding: 6px 10px;
+    margin-top: 2px;
+  }
 </style>
 </head>
 <body>
@@ -314,7 +321,7 @@ let bayIndex = new Map();     // BAY (upper) -> [rows]
 let bayShelfIndex = new Map(); // BAY|SHELF (upper) -> [rows]
 let fileTimestamp = null;     // Date the xlsx itself reports as its last-modified time (its own embedded metadata, not when we happened to fetch it)
 
-const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000; // flag the age line if the file hasn't been refreshed in over a week
+const STALE_AFTER_MS = 24 * 60 * 60 * 1000; // highlight the age line once the file is more than a day old
 
 const statusText = document.getElementById('statusText');
 const fileAgeText = document.getElementById('fileAgeText');
