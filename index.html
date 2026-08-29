@@ -40,6 +40,21 @@
   }
   .wrap { width: 100%; max-width: 640px; }
 
+  .brand-header {
+    background: #ffffff;
+    border-radius: 14px;
+    padding: 14px 20px;
+    margin: 4px 0 14px;
+    display: flex;
+    justify-content: center;
+  }
+  .brand-header img {
+    display: block;
+    width: 100%;
+    max-width: 420px;
+    height: auto;
+  }
+
   h1 {
     font-size: 1.25rem;
     margin: 4px 0 14px;
@@ -249,6 +264,10 @@
 </head>
 <body>
 <div class="wrap">
+  <div class="brand-header">
+    <img src="https://teamworkfencing.com.au/wp-content/uploads/2022/12/teamworkfencing-2048x497.jpg" alt="Team Work Fencing" loading="eager">
+  </div>
+
   <h1>Warehouse Inventory Lookup<span class="version-tag" id="versionTag"></span></h1>
 
   <div class="status-bar">
@@ -283,7 +302,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.9";
+const APP_VERSION = "0.10";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
