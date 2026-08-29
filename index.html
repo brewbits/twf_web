@@ -230,6 +230,14 @@
   .back-link:active { opacity: 0.7; }
 
   .footer-note { text-align: center; color: var(--text-dim); font-size: 0.75rem; margin-top: 8px; }
+
+  .file-age {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    margin: -6px 0 14px;
+  }
+  .file-age.stale { color: var(--warn); }
 </style>
 </head>
 <body>
@@ -240,6 +248,7 @@
     <span id="statusText"><span class="status-dot loading"></span>Loading inventory…</span>
     <button id="refreshBtn">Refresh</button>
   </div>
+  <div class="file-age" id="fileAgeText"></div>
 
   <div class="scan-panel">
     <label for="scanInput">Scan or type a code, then press Enter</label>
@@ -267,7 +276,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.8";
+const APP_VERSION = "0.9";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -303,8 +312,12 @@ let rows = [];
 let sidIndex = new Map();     // SID (upper) -> row, Entry Type = Item
 let bayIndex = new Map();     // BAY (upper) -> [rows]
 let bayShelfIndex = new Map(); // BAY|SHELF (upper) -> [rows]
+let fileTimestamp = null;     // Date the xlsx itself reports as its last-modified time (its own embedded metadata, not when we happened to fetch it)
+
+const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000; // flag the age line if the file hasn't been refreshed in over a week
 
 const statusText = document.getElementById('statusText');
+const fileAgeText = document.getElementById('fileAgeText');
 const resultEl = document.getElementById('result');
 const scanInput = document.getElementById('scanInput');
 
@@ -312,6 +325,31 @@ function setStatus(kind, text) {
   const dotClass = kind === 'ok' ? 'ok' : kind === 'error' ? 'bad' : 'loading';
   statusText.innerHTML = `<span class="status-dot ${dotClass}"></span>${text}`;
 }
+
+function formatRelativeAge(date) {
+  const diffMs = Date.now() - date.getTime();
+  const minutes = Math.floor(diffMs / 60000);
+  const hours = Math.floor(diffMs / 3600000);
+  const days = Math.floor(diffMs / 86400000);
+
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+function updateFileAgeDisplay() {
+  if (!fileTimestamp) {
+    fileAgeText.textContent = '';
+    fileAgeText.classList.remove('stale');
+    return;
+  }
+  const isStale = (Date.now() - fileTimestamp.getTime()) > STALE_AFTER_MS;
+  fileAgeText.classList.toggle('stale', isStale);
+  fileAgeText.textContent = `Inventory file last updated ${formatRelativeAge(fileTimestamp)}`;
+  fileAgeText.title = fileTimestamp.toLocaleString();
+}
+setInterval(updateFileAgeDisplay, 30000); // keep the relative time accurate without needing a refresh
 
 function isAssigned(v) {
   if (v === undefined || v === null) return false;
@@ -333,6 +371,18 @@ async function loadData() {
     const wb = XLSX.read(buf, { type: 'array' });
     const ws = wb.Sheets[wb.SheetNames[0]];
     rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+
+    // The file's own embedded "modified" timestamp (from Excel's docProps/
+    // core.xml) reflects when this export was actually last saved - more
+    // reliable than "created", which real exports have shown can predate
+    // "modified" by hours (the file object isn't necessarily freshly
+    // created from scratch on every export). Falls back to "created" only
+    // if "modified" is missing.
+    const props = wb.Props || {};
+    fileTimestamp = (props.ModifiedDate instanceof Date) ? props.ModifiedDate
+      : (props.CreatedDate instanceof Date) ? props.CreatedDate
+      : null;
+    updateFileAgeDisplay();
 
     sidIndex = new Map();
     bayIndex = new Map();
