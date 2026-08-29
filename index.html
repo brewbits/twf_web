@@ -225,7 +225,7 @@
   }
   .item-row:last-child { border-bottom: none; }
   .item-row .name-col { flex: 1; min-width: 0; }
-  .item-row .shelf-tag {
+  .shelf-tag {
     font-size: 0.7rem; color: var(--text-dim); background: var(--panel-2);
     border-radius: 6px; padding: 1px 6px; margin-left: 6px;
   }
@@ -234,15 +234,44 @@
   .item-row.clickable:active { background: var(--panel-2); }
   .empty-note { color: var(--text-dim); font-size: 0.9rem; }
   .search-note { color: var(--text-dim); font-size: 0.8rem; margin-top: 10px; }
-  .back-link {
-    display: inline-block;
-    color: var(--accent);
-    font-size: 0.85rem;
+
+  .search-segmented {
+    display: flex;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 3px;
     margin-bottom: 12px;
-    cursor: pointer;
-    text-decoration: none;
   }
-  .back-link:active { opacity: 0.7; }
+  .search-segmented button {
+    flex: 1;
+    padding: 8px 6px;
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    font-size: 0.83rem;
+    font-family: inherit;
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  .search-segmented button.active { background: var(--accent); color: #fff; font-weight: 600; }
+
+  .group { border-bottom: 1px solid var(--border); }
+  .group:last-child { border-bottom: none; }
+  .group-toggle {
+    display: flex; align-items: center; gap: 8px;
+    padding: 11px 2px; cursor: pointer; user-select: none;
+  }
+  .group-toggle:active { background: var(--panel-2); }
+  .chevron {
+    color: var(--text-dim); font-size: 0.65rem; width: 10px;
+    display: inline-block; transition: transform 0.15s; flex-shrink: 0;
+  }
+  .group.open .chevron { transform: rotate(90deg); }
+  .group-label { font-weight: 600; font-size: 0.9rem; flex: 1; }
+  .group-count { color: var(--text-dim); font-size: 0.78rem; white-space: nowrap; }
+  .group-body { display: none; padding: 0 0 10px 18px; }
+  .group.open .group-body { display: block; }
 
   .footer-note { text-align: center; color: var(--text-dim); font-size: 0.75rem; margin-top: 8px; }
 
@@ -302,7 +331,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.10";
+const APP_VERSION = "0.11";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -462,22 +491,15 @@ function renderNotFound(code) {
     </div>`;
 }
 
-function renderItem(records, opts = {}) {
+function itemDetailBodyHtml(records) {
   // The same SID can legitimately appear as more than one stock record
   // (e.g. the same item held in both Perth and Bunbury warehouses), so this
   // always renders a list of one-or-more location blocks, never assumes one.
-  const first = records[0];
-  const name = String(first[COL.name] || '(unnamed item)');
-  const sid = String(first[COL.sid] || '');
-  const unit = String(first[COL.unit] || '');
-
+  // Shared between the direct SID-scan item view and the search results'
+  // "Product name" group expansion, so both stay in sync automatically.
+  const unit = String(records[0][COL.unit] || '');
   const descriptions = [...new Set(records.map(r => String(r[COL.description] || '').trim()).filter(Boolean))];
   const sharedDescription = descriptions.length === 1 ? descriptions[0] : null;
-
-  const totalQty = records.reduce((sum, r) => {
-    const n = Number(r[COL.qty]);
-    return sum + (Number.isFinite(n) ? n : 0);
-  }, 0);
 
   const locationsHtml = records.map(r => {
     const rack = String(r[COL.rack] || '').trim();
@@ -498,22 +520,25 @@ function renderItem(records, opts = {}) {
       </div>`;
   }).join('<hr class="loc-divider">');
 
-  const backLink = opts.fromSearch
-    ? `<a class="back-link" id="backToSearchLink">&larr; Back to search results</a>`
-    : '';
+  return (sharedDescription ? `<div class="description">${escapeHtml(sharedDescription)}</div>` : '') + locationsHtml;
+}
+
+function renderItem(records) {
+  const first = records[0];
+  const name = String(first[COL.name] || '(unnamed item)');
+  const sid = String(first[COL.sid] || '');
+  const unit = String(first[COL.unit] || '');
+  const totalQty = records.reduce((sum, r) => {
+    const n = Number(r[COL.qty]);
+    return sum + (Number.isFinite(n) ? n : 0);
+  }, 0);
 
   resultEl.innerHTML = `
-    ${backLink}
     <div class="card item">
       <h2>${escapeHtml(name)}</h2>
       <div class="sub">SID ${escapeHtml(sid)}${records.length > 1 ? ` · ${records.length} stock locations · total ${totalQty} ${escapeHtml(unit)}` : ''}</div>
-      ${sharedDescription ? `<div class="description">${escapeHtml(sharedDescription)}</div>` : ''}
-      ${locationsHtml}
+      ${itemDetailBodyHtml(records)}
     </div>`;
-
-  if (opts.fromSearch) {
-    document.getElementById('backToSearchLink').addEventListener('click', renderSearchResults);
-  }
 }
 
 function renderLocation(title, subtitle, items) {
@@ -593,7 +618,9 @@ function handleScan(raw) {
 }
 
 // ---- free-text search ----
-let lastSearchState = null; // { query, matchedSids: [...] } or null when no active search
+let lastSearchState = null;   // { query, matchedSids: [...] } or null when no active search
+let searchGroupMode = 'name'; // 'name' or 'location' - persists across searches until the user changes it
+let expandedGroupKey = null;  // which single group is open - resets on every new search or mode switch
 
 function performSearch(rawQuery) {
   const query = rawQuery.trim();
@@ -624,7 +651,96 @@ function performSearch(rawQuery) {
   }
 
   lastSearchState = { query, matchedSids };
+  expandedGroupKey = null; // a new search always starts fully collapsed
   renderSearchResults();
+}
+
+function buildSearchNameGroups(sids) {
+  // Product name and SID are effectively 1:1, so this groups one-item-per-
+  // group sorted alphabetically by name - expanding a group shows that
+  // item's full detail (description + every stock location), the same
+  // content a direct SID scan would show.
+  const sorted = [...sids].sort((a, b) => {
+    const an = String((sidIndex.get(a) || [{}])[0][COL.name] || '');
+    const bn = String((sidIndex.get(b) || [{}])[0][COL.name] || '');
+    return an.localeCompare(bn);
+  });
+  return sorted.map(sidKey => {
+    const records = sidIndex.get(sidKey) || [];
+    const first = records[0] || {};
+    const name = String(first[COL.name] || '(unnamed item)');
+    const unit = String(first[COL.unit] || '');
+    const totalQty = records.reduce((s, r) => {
+      const n = Number(r[COL.qty]);
+      return s + (Number.isFinite(n) ? n : 0);
+    }, 0);
+    return {
+      key: 'name:' + sidKey,
+      label: `${escapeHtml(name)}${records.length > 1 ? `<span class="shelf-tag">${records.length} locations</span>` : ''}`,
+      count: `${escapeHtml(sidKey)} &middot; ${totalQty} ${escapeHtml(unit)}`,
+      body: itemDetailBodyHtml(records)
+    };
+  });
+}
+
+function buildSearchLocationGroups(sids) {
+  // Grouped by the item's top-level folder (its warehouse), never a deeper
+  // subfolder. An item stocked in more than one warehouse appears once
+  // under EACH of those warehouses' groups, tagged with its location count,
+  // since a picker at either warehouse needs to see it under their own.
+  const byFolder = new Map();
+  for (const sidKey of sids) {
+    const records = sidIndex.get(sidKey) || [];
+    for (const r of records) {
+      const folder = String(r[COL.primaryFolder] || '').trim() || 'Not assigned';
+      if (!byFolder.has(folder)) byFolder.set(folder, []);
+      byFolder.get(folder).push(r);
+    }
+  }
+  const folders = [...byFolder.keys()].sort((a, b) => a.localeCompare(b));
+  return folders.map(folder => {
+    const entries = byFolder.get(folder).sort((a, b) =>
+      String(a[COL.name] || '').localeCompare(String(b[COL.name] || '')));
+
+    const rowsHtml = entries.map(r => {
+      const sidKey = String(r[COL.sid] || '').trim().toUpperCase();
+      const records = sidIndex.get(sidKey) || [r];
+      const rack = String(r[COL.rack] || '').trim();
+      const shelf = String(r[COL.shelf] || '').trim();
+      const locLabel = isAssigned(rack)
+        ? `${escapeHtml(rack)}${isAssigned(shelf) ? ', Shelf ' + escapeHtml(shelf) : ''}`
+        : 'Not assigned';
+      const category = folderBreadcrumb(r).slice(1); // drop the folder itself - already this group's header
+
+      return `
+        <div class="item-row">
+          <div class="name-col">
+            <span class="name">${escapeHtml(String(r[COL.name] || ''))}${records.length > 1 ? `<span class="shelf-tag">${records.length} locations</span>` : ''}</span>
+            <div class="breadcrumb small">SID ${escapeHtml(sidKey)}${category.length ? ' &middot; ' + category.map(escapeHtml).join(' &rsaquo; ') : ''} &middot; ${locLabel}</div>
+          </div>
+          <span class="qty">${escapeHtml(String(r[COL.qty] ?? ''))} ${escapeHtml(String(r[COL.unit] || ''))}</span>
+        </div>`;
+    }).join('');
+
+    return {
+      key: 'location:' + folder,
+      label: escapeHtml(folder),
+      count: `${entries.length} item${entries.length === 1 ? '' : 's'}`,
+      body: `<div class="item-list">${rowsHtml}</div>`
+    };
+  });
+}
+
+function renderGroupAccordion(groups) {
+  return groups.map(g => `
+    <div class="group${expandedGroupKey === g.key ? ' open' : ''}" data-key="${escapeHtml(g.key)}">
+      <div class="group-toggle">
+        <span class="chevron">&#9656;</span>
+        <span class="group-label">${g.label}</span>
+        <span class="group-count">${g.count}</span>
+      </div>
+      <div class="group-body">${g.body}</div>
+    </div>`).join('');
 }
 
 function renderSearchResults() {
@@ -637,27 +753,14 @@ function renderSearchResults() {
   }
 
   const shown = matchedSids.slice(0, SEARCH_RESULT_CAP);
-  const rowsHtml = shown.map(sidKey => {
-    const records = sidIndex.get(sidKey) || [];
-    const first = records[0];
-    if (!first) return '';
-    const name = String(first[COL.name] || '(unnamed item)');
-    const totalQty = records.reduce((sum, r) => {
-      const n = Number(r[COL.qty]);
-      return sum + (Number.isFinite(n) ? n : 0);
-    }, 0);
-    const unit = String(first[COL.unit] || '');
-    const breadcrumb = folderBreadcrumb(first);
+  const groups = searchGroupMode === 'location' ? buildSearchLocationGroups(shown) : buildSearchNameGroups(shown);
 
-    return `
-      <div class="item-row clickable" data-sid="${escapeHtml(sidKey)}">
-        <div class="name-col">
-          <span class="name">${escapeHtml(name)}</span>
-          <div class="breadcrumb small">SID ${escapeHtml(sidKey)}${records.length > 1 ? ` &middot; ${records.length} locations` : ''}${breadcrumb.length ? ` &middot; ${breadcrumb.map(escapeHtml).join(' &rsaquo; ')}` : ''}</div>
-        </div>
-        <span class="qty">${escapeHtml(String(totalQty))} ${escapeHtml(unit)}</span>
-      </div>`;
-  }).join('');
+  const subtitle = searchGroupMode === 'location'
+    ? (() => {
+        const totalRecords = groups.reduce((s, g) => s + (g.body.match(/item-row/g) || []).length, 0);
+        return `${totalRecords} stock record${totalRecords === 1 ? '' : 's'} across ${shown.length} item${shown.length === 1 ? '' : 's'}`;
+      })()
+    : `${shown.length} item${shown.length === 1 ? '' : 's'} found`;
 
   const cappedNote = matchedSids.length > SEARCH_RESULT_CAP
     ? `<div class="search-note">Showing top ${SEARCH_RESULT_CAP} of ${matchedSids.length} matches - refine your search for a shorter list.</div>`
@@ -666,15 +769,33 @@ function renderSearchResults() {
   resultEl.innerHTML = `
     <div class="card location">
       <h2>Search results for "${escapeHtml(query)}"</h2>
-      <div class="sub">${matchedSids.length} item${matchedSids.length === 1 ? '' : 's'} found</div>
-      <div class="item-list">${rowsHtml}</div>
+      <div class="sub">${subtitle}</div>
+      <div class="search-segmented">
+        <button data-groupmode="name" class="${searchGroupMode === 'name' ? 'active' : ''}">Product name</button>
+        <button data-groupmode="location" class="${searchGroupMode === 'location' ? 'active' : ''}">By location</button>
+      </div>
+      <div id="groupList">${renderGroupAccordion(groups)}</div>
       ${cappedNote}
     </div>`;
 
-  resultEl.querySelectorAll('.item-row.clickable').forEach(el => {
-    el.addEventListener('click', () => {
-      const sidKey = el.getAttribute('data-sid');
-      renderItem(sidIndex.get(sidKey), { fromSearch: true });
+  resultEl.querySelectorAll('.search-segmented button').forEach(b => {
+    b.addEventListener('click', () => {
+      searchGroupMode = b.dataset.groupmode;
+      expandedGroupKey = null; // switching modes always lands back on the fully collapsed view
+      renderSearchResults();
+    });
+  });
+
+  resultEl.querySelectorAll('.group-toggle').forEach(t => {
+    t.addEventListener('click', () => {
+      // Only one group open at a time - this is mostly used on a phone
+      // screen, and the grouping itself is the important structure, so
+      // there's no need to compare two expanded groups side by side.
+      const key = t.closest('.group').dataset.key;
+      expandedGroupKey = (expandedGroupKey === key) ? null : key;
+      resultEl.querySelectorAll('.group').forEach(el => {
+        el.classList.toggle('open', el.dataset.key === expandedGroupKey);
+      });
     });
   });
 }
