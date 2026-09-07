@@ -331,7 +331,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.13";
+const APP_VERSION = "0.14";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -366,8 +366,10 @@ function folderBreadcrumb(r) {
 
 let rows = [];
 let sidIndex = new Map();     // SID (upper) -> row, Entry Type = Item
-let bayIndex = new Map();     // BAY (upper) -> [rows]
-let bayShelfIndex = new Map(); // BAY|SHELF (upper) -> [rows]
+let bayIndex = new Map();     // BAY (upper) -> [rows], from Pick - Rack (the item's actual pick location)
+let bayShelfIndex = new Map(); // BAY|SHELF (upper) -> [rows], from Pick - Rack + Pick - Shelf
+let altBayIndex = new Map();      // BAY (upper) -> [rows], from Alternate Stock Location (Rack & Shelf)
+let altBayShelfIndex = new Map(); // BAY|SHELF (upper) -> [rows], from Alternate Stock Location (Rack & Shelf)
 let fileTimestamp = null;     // Date the xlsx itself reports as its last-modified time (its own embedded metadata, not when we happened to fetch it)
 
 const STALE_AFTER_MS = 24 * 60 * 60 * 1000; // highlight the age line once the file is more than a day old
@@ -443,6 +445,8 @@ async function loadData() {
     sidIndex = new Map();
     bayIndex = new Map();
     bayShelfIndex = new Map();
+    altBayIndex = new Map();
+    altBayShelfIndex = new Map();
 
     for (const r of rows) {
       const sid = String(r[COL.sid] || '').trim();
@@ -471,6 +475,25 @@ async function loadData() {
           const combo = rackKey + '|' + shelf.toUpperCase();
           if (!bayShelfIndex.has(combo)) bayShelfIndex.set(combo, []);
           bayShelfIndex.get(combo).push(r);
+        }
+      }
+
+      // The Alternate Stock Location field can list several rack+shelf
+      // codes for a single row (comma-separated, e.g. "PER-A-R02-01,
+      // PER-A-R02-02"), unlike Pick - Rack/Shelf which is one value per
+      // row - so one row can be indexed under several different alt keys.
+      const altRaw = String(r[COL.altLocation] || '').trim();
+      if (altRaw) {
+        for (const token of altRaw.split(/[,;]/)) {
+          const t = token.trim();
+          const m = t.match(/^(.+)-(\d{2})$/);
+          if (!m) continue;
+          const altRackKey = m[1].toUpperCase();
+          const altCombo = altRackKey + '|' + m[2];
+          if (!altBayIndex.has(altRackKey)) altBayIndex.set(altRackKey, []);
+          altBayIndex.get(altRackKey).push(r);
+          if (!altBayShelfIndex.has(altCombo)) altBayShelfIndex.set(altCombo, []);
+          altBayShelfIndex.get(altCombo).push(r);
         }
       }
     }
@@ -544,12 +567,30 @@ function renderItem(records) {
     </div>`;
 }
 
-function renderLocation(title, subtitle, items) {
+function mergeLocationMatches(pickRows, altRows) {
+  // A location scan covers items whose PICK location is here (the normal
+  // case) plus items that merely list this rack/shelf as an ALTERNATE
+  // stock location - a comprehensive result covering both pick and stock
+  // locations, per the project owner's request. A row already matched via
+  // its pick location is never also flagged as an alt-only match, even if
+  // its own Alternate Stock Location field happens to also list this same
+  // rack (redundant, but shouldn't double up or mislabel it).
+  const seen = new Set(pickRows);
+  const merged = pickRows.map(row => ({ row, altOnly: false }));
+  for (const row of altRows) {
+    if (seen.has(row)) continue;
+    seen.add(row);
+    merged.push({ row, altOnly: true });
+  }
+  return merged;
+}
+
+function renderLocation(title, subtitle, entries) {
   let body;
-  if (!items || items.length === 0) {
+  if (!entries || entries.length === 0) {
     body = `<div class="empty-note">No items currently recorded at this location.</div>`;
   } else {
-    body = `<div class="item-list">` + items.map(r => {
+    body = `<div class="item-list">` + entries.map(({ row: r, altOnly }) => {
       const breadcrumb = folderBreadcrumb(r);
       return `
       <div class="item-row">
@@ -557,7 +598,7 @@ function renderLocation(title, subtitle, items) {
           <span class="name">${escapeHtml(String(r[COL.name] || ''))}${
             subtitle === 'ALL_SHELVES' && isAssigned(r[COL.shelf])
               ? `<span class="shelf-tag">Shelf ${escapeHtml(String(r[COL.shelf]))}</span>` : ''
-          }</span>
+          }${altOnly ? `<span class="shelf-tag">Alt. location</span>` : ''}</span>
           ${breadcrumb.length ? `<div class="breadcrumb small">${breadcrumb.map(escapeHtml).join(' &rsaquo; ')}</div>` : ''}
         </div>
         <span class="qty">${escapeHtml(String(r[COL.qty] ?? ''))} ${escapeHtml(String(r[COL.unit] || ''))}</span>
@@ -568,7 +609,7 @@ function renderLocation(title, subtitle, items) {
   resultEl.innerHTML = `
     <div class="card location">
       <h2>${escapeHtml(title)}</h2>
-      <div class="sub">${items.length} item${items.length === 1 ? '' : 's'}</div>
+      <div class="sub">${entries.length} item${entries.length === 1 ? '' : 's'}</div>
       ${body}
     </div>`;
 }
@@ -598,22 +639,31 @@ function handleScan(raw) {
     return;
   }
 
-  // 2. Bay + shelf combined code, e.g. PER-A-R04-01 (split on last "-NN")
+  // 2. Bay + shelf combined code, e.g. PER-A-R04-01 (split on last "-NN").
+  // Covers both the item's actual pick location AND anything that merely
+  // lists this rack/shelf as an alternate stock location, for a
+  // comprehensive result rather than pick-location-only.
   const shelfSplit = upper.match(/^(.+)-(\d{2})$/);
   if (shelfSplit) {
     const bayPart = shelfSplit[1];
     const shelfPart = shelfSplit[2];
     const combo = bayPart + '|' + shelfPart;
-    if (bayShelfIndex.has(combo)) {
-      renderLocation(`Rack ${bayPart}, Shelf ${shelfPart}`, 'ONE_SHELF', bayShelfIndex.get(combo));
+    const pickMatches = bayShelfIndex.get(combo) || [];
+    const altMatches = altBayShelfIndex.get(combo) || [];
+    if (pickMatches.length || altMatches.length) {
+      renderLocation(`Rack ${bayPart}, Shelf ${shelfPart}`, 'ONE_SHELF', mergeLocationMatches(pickMatches, altMatches));
       return;
     }
   }
 
-  // 3. Bay only, e.g. PER-A-R04
-  if (bayIndex.has(upper)) {
-    renderLocation(`Rack ${upper} (all shelves)`, 'ALL_SHELVES', bayIndex.get(upper));
-    return;
+  // 3. Bay only, e.g. PER-A-R04 - same pick + alternate comprehensive merge.
+  {
+    const pickMatches = bayIndex.get(upper) || [];
+    const altMatches = altBayIndex.get(upper) || [];
+    if (pickMatches.length || altMatches.length) {
+      renderLocation(`Rack ${upper} (all shelves)`, 'ALL_SHELVES', mergeLocationMatches(pickMatches, altMatches));
+      return;
+    }
   }
 
   // 4. Nothing matched
