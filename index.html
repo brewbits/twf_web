@@ -331,7 +331,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.12";
+const APP_VERSION = "0.13";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -492,19 +492,6 @@ function renderNotFound(code) {
     </div>`;
 }
 
-function formatAltLocations(raw) {
-  // Values look like "PER-A-R02-01, PER-A-R02-02, PER-A-R02-03" - a list of
-  // full rack+shelf codes, same "-NN" combined format used everywhere else
-  // in this app. Reuse that exact parsing so the display reads the same
-  // way ("Rack, Shelf NN") rather than showing the raw codes verbatim.
-  return raw.split(/[,;]/).map(token => {
-    const t = token.trim();
-    if (!t) return null;
-    const m = t.match(/^(.+)-(\d{2})$/);
-    return m ? `${m[1]}, Shelf ${m[2]}` : t;
-  }).filter(Boolean).join('; ');
-}
-
 function itemDetailBodyHtml(records) {
   // The same SID can legitimately appear as more than one stock record
   // (e.g. the same item held in both Perth and Bunbury warehouses), so this
@@ -531,7 +518,7 @@ function itemDetailBodyHtml(records) {
         <div class="kv"><span class="k">Rack</span><span class="v ${rackAssigned ? '' : 'unassigned'}">${rackAssigned ? escapeHtml(rack) : 'Not assigned'}</span></div>
         <div class="kv"><span class="k">Shelf</span><span class="v ${shelfAssigned ? '' : 'unassigned'}">${shelfAssigned ? escapeHtml(shelf) : 'Not assigned'}</span></div>
         <div class="kv"><span class="k">Quantity</span><span class="v">${escapeHtml(String(r[COL.qty] ?? ''))} ${escapeHtml(unit)}</span></div>
-        ${altRaw ? `<div class="kv"><span class="k">Alt. locations</span><span class="v">${escapeHtml(formatAltLocations(altRaw))}</span></div>` : ''}
+        ${altRaw ? `<div class="kv"><span class="k">Alt. locations</span><span class="v">${escapeHtml(altRaw)}</span></div>` : ''}
         ${r[COL.notes] ? `<div class="kv"><span class="k">Notes</span><span class="v">${escapeHtml(String(r[COL.notes]))}</span></div>` : ''}
       </div>`;
   }).join('<hr class="loc-divider">');
