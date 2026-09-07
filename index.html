@@ -331,7 +331,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.14";
+const APP_VERSION = "0.15";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -567,38 +567,74 @@ function renderItem(records) {
     </div>`;
 }
 
-function mergeLocationMatches(pickRows, altRows) {
-  // A location scan covers items whose PICK location is here (the normal
-  // case) plus items that merely list this rack/shelf as an ALTERNATE
-  // stock location - a comprehensive result covering both pick and stock
-  // locations, per the project owner's request. A row already matched via
-  // its pick location is never also flagged as an alt-only match, even if
-  // its own Alternate Stock Location field happens to also list this same
-  // rack (redundant, but shouldn't double up or mislabel it).
+function buildOneShelfEntries(pickRows, altRows) {
+  // Scanning one exact rack+shelf: an item is either genuinely picked here
+  // or merely lists this exact rack+shelf as an alternate. A row already
+  // matched via its pick location is never also flagged as alt, even if
+  // its own Alternate Stock Location field happens to also name this same
+  // rack+shelf (redundant, but shouldn't double up or mislabel it).
   const seen = new Set(pickRows);
-  const merged = pickRows.map(row => ({ row, altOnly: false }));
+  const entries = pickRows.map(row => ({ row, tags: [] }));
   for (const row of altRows) {
     if (seen.has(row)) continue;
     seen.add(row);
-    merged.push({ row, altOnly: true });
+    entries.push({ row, tags: [{ label: 'Alt. location', isAlt: true }] });
   }
-  return merged;
+  return entries;
 }
 
-function renderLocation(title, subtitle, entries) {
+function buildAllShelvesEntries(rackKey, pickRows, altRows) {
+  // Scanning a whole rack (no specific shelf): show EVERY shelf reference
+  // within this rack for each item - its pick shelf if this is genuinely
+  // its pick rack, PLUS any distinct alternate shelves this same rack
+  // appears under in its own Alternate Stock Location field. Both are
+  // real, useful information at the whole-rack level (unlike the
+  // one-exact-shelf case above, where an alt entry matching the pick
+  // shelf exactly would be pure noise) - so this deliberately does NOT
+  // collapse an item down to a single shelf reference the way the
+  // one-shelf case does.
+  const rowSet = new Set([...pickRows, ...altRows]);
+  return [...rowSet].map(row => {
+    const pickShelf = String(row[COL.shelf] || '').trim();
+    const rowPickRack = String(row[COL.rack] || '').trim().toUpperCase();
+    const isPickHere = rowPickRack === rackKey && isAssigned(pickShelf);
+
+    const tags = [];
+    const seenShelves = new Set();
+    if (isPickHere) {
+      tags.push({ label: `Shelf ${pickShelf}`, isAlt: false });
+      seenShelves.add(pickShelf);
+    }
+
+    const altRaw = String(row[COL.altLocation] || '').trim();
+    if (altRaw) {
+      for (const token of altRaw.split(/[,;]/)) {
+        const t = token.trim();
+        const m = t.match(/^(.+)-(\d{2})$/);
+        if (!m || m[1].toUpperCase() !== rackKey) continue;
+        const altShelf = m[2];
+        if (seenShelves.has(altShelf)) continue; // same shelf as pick, or a repeated token - not new info
+        seenShelves.add(altShelf);
+        tags.push({ label: `Shelf ${altShelf} (Alt)`, isAlt: true });
+      }
+    }
+
+    return { row, tags };
+  });
+}
+
+function renderLocation(title, entries) {
   let body;
   if (!entries || entries.length === 0) {
     body = `<div class="empty-note">No items currently recorded at this location.</div>`;
   } else {
-    body = `<div class="item-list">` + entries.map(({ row: r, altOnly }) => {
+    body = `<div class="item-list">` + entries.map(({ row: r, tags }) => {
       const breadcrumb = folderBreadcrumb(r);
+      const tagsHtml = tags.map(t => `<span class="shelf-tag">${escapeHtml(t.label)}</span>`).join('');
       return `
       <div class="item-row">
         <div class="name-col">
-          <span class="name">${escapeHtml(String(r[COL.name] || ''))}${
-            subtitle === 'ALL_SHELVES' && isAssigned(r[COL.shelf])
-              ? `<span class="shelf-tag">Shelf ${escapeHtml(String(r[COL.shelf]))}</span>` : ''
-          }${altOnly ? `<span class="shelf-tag">Alt. location</span>` : ''}</span>
+          <span class="name">${escapeHtml(String(r[COL.name] || ''))}${tagsHtml}</span>
           ${breadcrumb.length ? `<div class="breadcrumb small">${breadcrumb.map(escapeHtml).join(' &rsaquo; ')}</div>` : ''}
         </div>
         <span class="qty">${escapeHtml(String(r[COL.qty] ?? ''))} ${escapeHtml(String(r[COL.unit] || ''))}</span>
@@ -651,17 +687,19 @@ function handleScan(raw) {
     const pickMatches = bayShelfIndex.get(combo) || [];
     const altMatches = altBayShelfIndex.get(combo) || [];
     if (pickMatches.length || altMatches.length) {
-      renderLocation(`Rack ${bayPart}, Shelf ${shelfPart}`, 'ONE_SHELF', mergeLocationMatches(pickMatches, altMatches));
+      renderLocation(`Rack ${bayPart}, Shelf ${shelfPart}`, buildOneShelfEntries(pickMatches, altMatches));
       return;
     }
   }
 
-  // 3. Bay only, e.g. PER-A-R04 - same pick + alternate comprehensive merge.
+  // 3. Bay only, e.g. PER-A-R04 - same pick + alternate comprehensive merge,
+  // but showing every distinct shelf reference per item (see
+  // buildAllShelvesEntries) rather than collapsing to one shelf.
   {
     const pickMatches = bayIndex.get(upper) || [];
     const altMatches = altBayIndex.get(upper) || [];
     if (pickMatches.length || altMatches.length) {
-      renderLocation(`Rack ${upper} (all shelves)`, 'ALL_SHELVES', mergeLocationMatches(pickMatches, altMatches));
+      renderLocation(`Rack ${upper} (all shelves)`, buildAllShelvesEntries(upper, pickMatches, altMatches));
       return;
     }
   }
