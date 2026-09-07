@@ -229,6 +229,17 @@
     font-size: 0.7rem; color: var(--text-dim); background: var(--panel-2);
     border-radius: 6px; padding: 1px 6px; margin-left: 6px;
   }
+  /* Visual key, used everywhere a location is shown: pink = pick location
+     (where to actually pick the item from), yellow = alternate/stock
+     location. Works as a tag modifier (.shelf-tag.loc-pick) or standalone
+     on inline text (e.g. a kv value or a breadcrumb fragment). */
+  .loc-pick, .loc-alt {
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-weight: 600;
+  }
+  .loc-pick { background: #f9a8d4; color: #831843; }
+  .loc-alt { background: #facc15; color: #111; }
   .item-row .qty { color: var(--text-dim); white-space: nowrap; }
   .item-row.clickable { cursor: pointer; }
   .item-row.clickable:active { background: var(--panel-2); }
@@ -331,7 +342,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.15";
+const APP_VERSION = "0.16";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -538,10 +549,10 @@ function itemDetailBodyHtml(records) {
       <div class="loc-block">
         ${breadcrumb.length ? `<div class="breadcrumb">${breadcrumb.map(escapeHtml).join(' &rsaquo; ')}</div>` : ''}
         ${rowDescription ? `<div class="description">${escapeHtml(rowDescription)}</div>` : ''}
-        <div class="kv"><span class="k">Rack</span><span class="v ${rackAssigned ? '' : 'unassigned'}">${rackAssigned ? escapeHtml(rack) : 'Not assigned'}</span></div>
-        <div class="kv"><span class="k">Shelf</span><span class="v ${shelfAssigned ? '' : 'unassigned'}">${shelfAssigned ? escapeHtml(shelf) : 'Not assigned'}</span></div>
+        <div class="kv"><span class="k">Rack</span><span class="v ${rackAssigned ? 'loc-pick' : 'unassigned'}">${rackAssigned ? escapeHtml(rack) : 'Not assigned'}</span></div>
+        <div class="kv"><span class="k">Shelf</span><span class="v ${shelfAssigned ? 'loc-pick' : 'unassigned'}">${shelfAssigned ? escapeHtml(shelf) : 'Not assigned'}</span></div>
         <div class="kv"><span class="k">Quantity</span><span class="v">${escapeHtml(String(r[COL.qty] ?? ''))} ${escapeHtml(unit)}</span></div>
-        ${altRaw ? `<div class="kv"><span class="k">Alt. locations</span><span class="v">${escapeHtml(altRaw)}</span></div>` : ''}
+        ${altRaw ? `<div class="kv"><span class="k">Alt. locations</span><span class="v loc-alt">${escapeHtml(altRaw)}</span></div>` : ''}
         ${r[COL.notes] ? `<div class="kv"><span class="k">Notes</span><span class="v">${escapeHtml(String(r[COL.notes]))}</span></div>` : ''}
       </div>`;
   }).join('<hr class="loc-divider">');
@@ -630,7 +641,7 @@ function renderLocation(title, entries) {
   } else {
     body = `<div class="item-list">` + entries.map(({ row: r, tags }) => {
       const breadcrumb = folderBreadcrumb(r);
-      const tagsHtml = tags.map(t => `<span class="shelf-tag">${escapeHtml(t.label)}</span>`).join('');
+      const tagsHtml = tags.map(t => `<span class="shelf-tag ${t.isAlt ? 'loc-alt' : 'loc-pick'}">${escapeHtml(t.label)}</span>`).join('');
       return `
       <div class="item-row">
         <div class="name-col">
@@ -799,7 +810,7 @@ function buildSearchLocationGroups(sids) {
       const rack = String(r[COL.rack] || '').trim();
       const shelf = String(r[COL.shelf] || '').trim();
       const locLabel = isAssigned(rack)
-        ? `${escapeHtml(rack)}${isAssigned(shelf) ? ', Shelf ' + escapeHtml(shelf) : ''}`
+        ? `<span class="loc-pick">${escapeHtml(rack)}${isAssigned(shelf) ? ', Shelf ' + escapeHtml(shelf) : ''}</span>`
         : 'Not assigned';
       const category = folderBreadcrumb(r).slice(1); // drop the folder itself - already this group's header
 
