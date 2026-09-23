@@ -342,7 +342,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.18";
+const APP_VERSION = "0.19";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -961,7 +961,12 @@ const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const cameraHintEl = document.querySelector('.camera-hint');
-const DEFAULT_CAMERA_HINT = cameraHintEl.textContent;
+// Includes which detection engine is active right in the hint text -
+// a phone user can't easily check this themselves (no practical dev
+// tools on most phones), so this makes it visible on every camera open
+// and lets a bug report name the actual engine involved without a
+// back-and-forth to establish that first.
+let DEFAULT_CAMERA_HINT = cameraHintEl.textContent;
 let hintRevertTimer = null;
 let stream = null;
 let scanning = false;
@@ -1090,7 +1095,12 @@ async function handleVideoTap(clientX, clientY) {
     }
 
     if (candidates.length === 0) {
-      flashCameraHint('No QR code found where you tapped - try again.');
+      // Include which engine ran and how many codes it saw, right on
+      // screen - this is the one piece of diagnostic info a phone user
+      // can't easily dig up themselves (dev tools aren't practical on a
+      // phone), so surfacing it here turns the next bug report into a
+      // self-diagnosing one instead of "still doesn't work".
+      flashCameraHint(`No QR code found (engine: ${detector ? 'native' : 'jsQR fallback'}, 0 codes detected) - try again.`, 4000);
       return;
     }
 
@@ -1102,7 +1112,11 @@ async function handleVideoTap(clientX, clientY) {
     }
     onCameraResult(best.value);
   } catch (e) {
-    /* leave the camera running - a failed tap shouldn't end the session */
+    // Leave the camera running - a failed tap shouldn't end the session -
+    // but show the actual error rather than swallowing it silently, so a
+    // real failure (as opposed to "just found nothing") is visible and
+    // reportable instead of looking identical to a normal empty result.
+    flashCameraHint('Scan error: ' + e.message, 4000);
   } finally {
     resolvingTap = false;
   }
@@ -1119,6 +1133,8 @@ async function startCamera() {
   await video.play();
   cameraPanel.classList.add('active');
   scanning = true;
+  DEFAULT_CAMERA_HINT = `Point the camera at a QR code (engine: ${detector ? 'native' : 'jsQR fallback'})`;
+  cameraHintEl.textContent = DEFAULT_CAMERA_HINT;
   resetStability();
   requestAnimationFrame(scanFrame);
 }
