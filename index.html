@@ -342,7 +342,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.17";
+const APP_VERSION = "0.18";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -1065,15 +1065,26 @@ async function handleVideoTap(clientX, clientY) {
 
   resolvingTap = true;
   try {
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
     let candidates = [];
     if (detector) {
-      const codes = await detector.detect(canvas);
+      // Detect directly on the live video, exactly like the continuous
+      // auto-fire scan does (which is known to work reliably) - not on a
+      // canvas snapshot. BarcodeDetector already returns every code in the
+      // frame in one call, so it never needed the canvas at all; routing
+      // it through one anyway was a real bug (canvas-sourced detection is
+      // a known weak spot for some BarcodeDetector implementations, and
+      // this was very likely why tapping found nothing when multiple
+      // codes were in frame even though the single-code auto-fire path,
+      // which also uses the video directly, worked fine).
+      const codes = await detector.detect(video);
       candidates = codes.map(c => ({ value: c.rawValue, point: centroid(c.cornerPoints) }));
     } else if (window.jsQR) {
+      // jsQR has no equivalent of detect(video) and needs raw pixel data
+      // to iteratively mask-and-rescan, so it's the only path that still
+      // needs a canvas snapshot of the current frame.
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       candidates = findAllCodesJsQR(canvas.width, canvas.height, 10)
         .map(c => ({ value: c.data, point: jsQRCentroid(c) }));
     }
