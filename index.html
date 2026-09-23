@@ -342,7 +342,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.19";
+const APP_VERSION = "0.20";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -1028,89 +1028,100 @@ function mapTapToVideoCoords(clientX, clientY) {
   };
 }
 
-// jsQR only ever returns ONE code per call, with no "find every code in the
-// frame" mode. To let the user pick a specific code out of several with
-// jsQR too, this runs jsQR repeatedly: find a code, paint over its quad so
-// it can't be found again, then look for another - enumerating every code
-// present. Only invoked on a tap (not every frame), since it's too slow to
-// run continuously.
-function findAllCodesJsQR(width, height, maxCodes) {
-  const found = [];
-  for (let i = 0; i < maxCodes; i++) {
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const code = jsQR(imageData.data, imageData.width, imageData.height);
-    if (!code) break;
-    found.push(code);
-    const loc = code.location;
-    ctx.fillStyle = '#000';
-    ctx.beginPath();
-    ctx.moveTo(loc.topLeftCorner.x, loc.topLeftCorner.y);
-    ctx.lineTo(loc.topRightCorner.x, loc.topRightCorner.y);
-    ctx.lineTo(loc.bottomRightCorner.x, loc.bottomRightCorner.y);
-    ctx.lineTo(loc.bottomLeftCorner.x, loc.bottomLeftCorner.y);
-    ctx.closePath();
-    ctx.fill();
-  }
-  return found;
+// v0.19's diagnostics confirmed the real issue: on the jsQR fallback engine,
+// tapping with multiple codes in frame reported "0 codes detected" even
+// though a single zoomed-in code decodes fine. That's not a coordinate-
+// mapping or masking bug - jsQR is a pure-JS decoder asked to resolve every
+// code's modules in one full-frame image, and several smaller/farther-apart
+// codes sharing one frame can simply fall below the pixel resolution it
+// needs, so it finds nothing at all rather than finding the wrong one.
+// Fix: a tap no longer asks either engine to find every code in the whole
+// frame. It crops a square region around the tap point straight out of the
+// video and digitally zooms into just that, so the engine only ever has to
+// decode the ONE code the user meant, at much higher effective resolution
+// than the full frame. Several crop sizes are tried, smallest (most zoomed)
+// first, growing outward in case the tap wasn't perfectly centered.
+const TAP_CROP_RADII_FRAC = [0.15, 0.25, 0.4, 0.6];
+const CROP_UPSCALE = 2;
+const CROP_MAX_DIM = 1400; // cap the canvas size a crop is upscaled to, for performance
+
+function computeCropBox(tapPoint, videoW, videoH, radiusFrac) {
+  const radius = Math.min(videoW, videoH) * radiusFrac;
+  const x0 = Math.max(0, tapPoint.x - radius);
+  const y0 = Math.max(0, tapPoint.y - radius);
+  const x1 = Math.min(videoW, tapPoint.x + radius);
+  const y1 = Math.min(videoH, tapPoint.y + radius);
+  return { x0, y0, w: x1 - x0, h: y1 - y0 };
 }
 
-function jsQRCentroid(code) {
-  const l = code.location;
-  return centroid([l.topLeftCorner, l.topRightCorner, l.bottomRightCorner, l.bottomLeftCorner]);
+// Draws just the cropped region of the current video frame into the shared
+// canvas, scaled up so the detector sees that code at higher effective
+// resolution than it would scanning the whole, un-zoomed frame.
+function drawCropToCanvas(box) {
+  let scale = CROP_UPSCALE;
+  if (box.w * scale > CROP_MAX_DIM || box.h * scale > CROP_MAX_DIM) {
+    scale = CROP_MAX_DIM / Math.max(box.w, box.h);
+  }
+  canvas.width = Math.max(1, Math.round(box.w * scale));
+  canvas.height = Math.max(1, Math.round(box.h * scale));
+  ctx.drawImage(video, box.x0, box.y0, box.w, box.h, 0, 0, canvas.width, canvas.height);
+}
+
+// Runs one detection attempt against whatever's currently drawn on the
+// canvas. The crop is centered on the tap, so if a detector finds more than
+// one code within it, the one closest to the canvas center is still the
+// best guess at which one the user meant.
+async function detectInCanvasCrop() {
+  if (detector) {
+    const codes = await detector.detect(canvas);
+    if (codes.length === 0) return null;
+    const center = { x: canvas.width / 2, y: canvas.height / 2 };
+    let best = codes[0];
+    let bestDist = distance(centroid(best.cornerPoints), center);
+    for (const c of codes.slice(1)) {
+      const d = distance(centroid(c.cornerPoints), center);
+      if (d < bestDist) { best = c; bestDist = d; }
+    }
+    return best.rawValue;
+  } else if (window.jsQR) {
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    // attemptBoth also tries the color-inverted image, which helps with
+    // labels that print white-on-dark or have glare/lighting variation.
+    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+    return code ? code.data : null;
+  }
+  return null;
 }
 
 // Manual override, available at any time regardless of engine or the
-// auto-fire debounce above: capture the current frame, find every QR code
-// in it, and use whichever one is CLOSEST to where the user tapped - not
-// necessarily the first one any detector happens to find.
+// auto-fire debounce above: zoom into the tapped spot and decode just the
+// one code there (see the crop strategy explained above).
 async function handleVideoTap(clientX, clientY) {
   if (!scanning || resolvingTap) return;
+  const videoW = video.videoWidth, videoH = video.videoHeight;
   const tapPoint = mapTapToVideoCoords(clientX, clientY);
-  if (!tapPoint) return;
+  if (!tapPoint || !videoW || !videoH) return;
 
   resolvingTap = true;
   try {
-    let candidates = [];
-    if (detector) {
-      // Detect directly on the live video, exactly like the continuous
-      // auto-fire scan does (which is known to work reliably) - not on a
-      // canvas snapshot. BarcodeDetector already returns every code in the
-      // frame in one call, so it never needed the canvas at all; routing
-      // it through one anyway was a real bug (canvas-sourced detection is
-      // a known weak spot for some BarcodeDetector implementations, and
-      // this was very likely why tapping found nothing when multiple
-      // codes were in frame even though the single-code auto-fire path,
-      // which also uses the video directly, worked fine).
-      const codes = await detector.detect(video);
-      candidates = codes.map(c => ({ value: c.rawValue, point: centroid(c.cornerPoints) }));
-    } else if (window.jsQR) {
-      // jsQR has no equivalent of detect(video) and needs raw pixel data
-      // to iteratively mask-and-rescan, so it's the only path that still
-      // needs a canvas snapshot of the current frame.
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      candidates = findAllCodesJsQR(canvas.width, canvas.height, 10)
-        .map(c => ({ value: c.data, point: jsQRCentroid(c) }));
+    let result = null;
+    for (const frac of TAP_CROP_RADII_FRAC) {
+      const box = computeCropBox(tapPoint, videoW, videoH, frac);
+      if (box.w <= 0 || box.h <= 0) continue;
+      drawCropToCanvas(box);
+      result = await detectInCanvasCrop();
+      if (result) break;
     }
 
-    if (candidates.length === 0) {
-      // Include which engine ran and how many codes it saw, right on
-      // screen - this is the one piece of diagnostic info a phone user
-      // can't easily dig up themselves (dev tools aren't practical on a
-      // phone), so surfacing it here turns the next bug report into a
-      // self-diagnosing one instead of "still doesn't work".
-      flashCameraHint(`No QR code found (engine: ${detector ? 'native' : 'jsQR fallback'}, 0 codes detected) - try again.`, 4000);
+    if (!result) {
+      // Include which engine ran, right on screen - this is the one piece
+      // of diagnostic info a phone user can't easily dig up themselves (dev
+      // tools aren't practical on a phone), so a bug report can name the
+      // actual engine involved without a back-and-forth to establish that.
+      flashCameraHint(`No QR code found near that point (engine: ${detector ? 'native' : 'jsQR fallback'}) - move closer and tap directly on the code.`, 4000);
       return;
     }
-
-    let best = candidates[0];
-    let bestDist = distance(best.point, tapPoint);
-    for (const c of candidates.slice(1)) {
-      const d = distance(c.point, tapPoint);
-      if (d < bestDist) { best = c; bestDist = d; }
-    }
-    onCameraResult(best.value);
+    onCameraResult(result);
   } catch (e) {
     // Leave the camera running - a failed tap shouldn't end the session -
     // but show the actual error rather than swallowing it silently, so a
@@ -1164,14 +1175,13 @@ async function scanFrame() {
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
         if (code && code.data) codesThisFrame = [code.data];
       }
 
-      // jsQR only ever reports 0 or 1 code per frame (see findAllCodesJsQR
-      // above for why continuous multi-code detection isn't available with
-      // it), so the "multiple codes" branch below only ever triggers with
-      // the native BarcodeDetector.
+      // jsQR only ever reports 0 or 1 code per frame, so the "multiple
+      // codes" branch below only ever triggers with the native
+      // BarcodeDetector.
       const signature = codesThisFrame.slice().sort().join('');
       if (signature !== stableSignature) {
         stableSignature = signature;
