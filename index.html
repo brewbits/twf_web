@@ -342,7 +342,7 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <script>
-const APP_VERSION = "0.16";
+const APP_VERSION = "0.17";
 const DATA_URL = "https://raw.githubusercontent.com/brewbits/twf/main/inventory_full.xlsx";
 
 const COL = {
@@ -960,11 +960,141 @@ const cameraPanel = document.getElementById('cameraPanel');
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
+const cameraHintEl = document.querySelector('.camera-hint');
+const DEFAULT_CAMERA_HINT = cameraHintEl.textContent;
+let hintRevertTimer = null;
 let stream = null;
 let scanning = false;
+let resolvingTap = false;
 let detector = null;
 if ('BarcodeDetector' in window) {
   try { detector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { detector = null; }
+}
+
+// Auto-fire only once the SAME single-code reading has held steady for this
+// long. Without this, panning the camera across a shelf of labels toward
+// the intended one would scan whichever code happened to enter frame
+// first, an instant before the others - a real risk of scanning the wrong
+// item while the user is still positioning the shot.
+const AUTO_FIRE_STABILITY_MS = 500;
+let stableSignature = null;
+let stableSince = 0;
+let actedOnStable = false;
+
+function resetStability() {
+  stableSignature = null;
+  stableSince = 0;
+  actedOnStable = false;
+}
+
+function flashCameraHint(msg, revertMs = 2000) {
+  cameraHintEl.textContent = msg;
+  if (hintRevertTimer) clearTimeout(hintRevertTimer);
+  hintRevertTimer = setTimeout(() => { cameraHintEl.textContent = DEFAULT_CAMERA_HINT; }, revertMs);
+}
+
+function centroid(points) {
+  const n = points.length;
+  return {
+    x: points.reduce((s, p) => s + p.x, 0) / n,
+    y: points.reduce((s, p) => s + p.y, 0) / n,
+  };
+}
+
+function distance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+// Maps a tap's on-screen coordinates to the underlying video frame's own
+// pixel coordinates, accounting for object-fit:cover (the displayed video
+// is scaled up and center-cropped to fill its box, so screen pixels and
+// frame pixels are not the same scale or origin).
+function mapTapToVideoCoords(clientX, clientY) {
+  const rect = video.getBoundingClientRect();
+  const videoW = video.videoWidth, videoH = video.videoHeight;
+  if (!videoW || !videoH) return null;
+  const scale = Math.max(rect.width / videoW, rect.height / videoH);
+  const renderedW = videoW * scale, renderedH = videoH * scale;
+  const offsetX = (renderedW - rect.width) / 2;
+  const offsetY = (renderedH - rect.height) / 2;
+  return {
+    x: ((clientX - rect.left) + offsetX) / scale,
+    y: ((clientY - rect.top) + offsetY) / scale,
+  };
+}
+
+// jsQR only ever returns ONE code per call, with no "find every code in the
+// frame" mode. To let the user pick a specific code out of several with
+// jsQR too, this runs jsQR repeatedly: find a code, paint over its quad so
+// it can't be found again, then look for another - enumerating every code
+// present. Only invoked on a tap (not every frame), since it's too slow to
+// run continuously.
+function findAllCodesJsQR(width, height, maxCodes) {
+  const found = [];
+  for (let i = 0; i < maxCodes; i++) {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const code = jsQR(imageData.data, imageData.width, imageData.height);
+    if (!code) break;
+    found.push(code);
+    const loc = code.location;
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.moveTo(loc.topLeftCorner.x, loc.topLeftCorner.y);
+    ctx.lineTo(loc.topRightCorner.x, loc.topRightCorner.y);
+    ctx.lineTo(loc.bottomRightCorner.x, loc.bottomRightCorner.y);
+    ctx.lineTo(loc.bottomLeftCorner.x, loc.bottomLeftCorner.y);
+    ctx.closePath();
+    ctx.fill();
+  }
+  return found;
+}
+
+function jsQRCentroid(code) {
+  const l = code.location;
+  return centroid([l.topLeftCorner, l.topRightCorner, l.bottomRightCorner, l.bottomLeftCorner]);
+}
+
+// Manual override, available at any time regardless of engine or the
+// auto-fire debounce above: capture the current frame, find every QR code
+// in it, and use whichever one is CLOSEST to where the user tapped - not
+// necessarily the first one any detector happens to find.
+async function handleVideoTap(clientX, clientY) {
+  if (!scanning || resolvingTap) return;
+  const tapPoint = mapTapToVideoCoords(clientX, clientY);
+  if (!tapPoint) return;
+
+  resolvingTap = true;
+  try {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    let candidates = [];
+    if (detector) {
+      const codes = await detector.detect(canvas);
+      candidates = codes.map(c => ({ value: c.rawValue, point: centroid(c.cornerPoints) }));
+    } else if (window.jsQR) {
+      candidates = findAllCodesJsQR(canvas.width, canvas.height, 10)
+        .map(c => ({ value: c.data, point: jsQRCentroid(c) }));
+    }
+
+    if (candidates.length === 0) {
+      flashCameraHint('No QR code found where you tapped - try again.');
+      return;
+    }
+
+    let best = candidates[0];
+    let bestDist = distance(best.point, tapPoint);
+    for (const c of candidates.slice(1)) {
+      const d = distance(c.point, tapPoint);
+      if (d < bestDist) { best = c; bestDist = d; }
+    }
+    onCameraResult(best.value);
+  } catch (e) {
+    /* leave the camera running - a failed tap shouldn't end the session */
+  } finally {
+    resolvingTap = false;
+  }
 }
 
 async function startCamera() {
@@ -978,6 +1108,7 @@ async function startCamera() {
   await video.play();
   cameraPanel.classList.add('active');
   scanning = true;
+  resetStability();
   requestAnimationFrame(scanFrame);
 }
 
@@ -988,6 +1119,8 @@ function stopCamera() {
     stream.getTracks().forEach(t => t.stop());
     stream = null;
   }
+  if (hintRevertTimer) { clearTimeout(hintRevertTimer); hintRevertTimer = null; }
+  cameraHintEl.textContent = DEFAULT_CAMERA_HINT;
   refocusInput();
 }
 
@@ -995,22 +1128,40 @@ async function scanFrame() {
   if (!scanning) return;
   if (video.readyState === video.HAVE_ENOUGH_DATA) {
     try {
+      let codesThisFrame = [];
       if (detector) {
         const codes = await detector.detect(video);
-        if (codes.length > 0) {
-          onCameraResult(codes[0].rawValue);
-          return;
-        }
-      } else if (window.jsQR) {
+        codesThisFrame = codes.map(c => c.rawValue);
+      } else if (window.jsQR && !resolvingTap) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const code = jsQR(imageData.data, imageData.width, imageData.height);
-        if (code && code.data) {
-          onCameraResult(code.data);
+        if (code && code.data) codesThisFrame = [code.data];
+      }
+
+      // jsQR only ever reports 0 or 1 code per frame (see findAllCodesJsQR
+      // above for why continuous multi-code detection isn't available with
+      // it), so the "multiple codes" branch below only ever triggers with
+      // the native BarcodeDetector.
+      const signature = codesThisFrame.slice().sort().join('');
+      if (signature !== stableSignature) {
+        stableSignature = signature;
+        stableSince = performance.now();
+        actedOnStable = false;
+        if (!hintRevertTimer) {
+          cameraHintEl.textContent = codesThisFrame.length > 1
+            ? 'Multiple QR codes found - tap the one you want'
+            : DEFAULT_CAMERA_HINT;
+        }
+      } else if (signature && !actedOnStable && (performance.now() - stableSince >= AUTO_FIRE_STABILITY_MS)) {
+        actedOnStable = true;
+        if (codesThisFrame.length === 1) {
+          onCameraResult(codesThisFrame[0]);
           return;
         }
+        // length > 1: leave the "tap the one you want" hint up and wait.
       }
     } catch (e) { /* keep scanning */ }
   }
@@ -1026,6 +1177,8 @@ function onCameraResult(text) {
   handleScan(cleaned);
   scanInput.select();
 }
+
+video.addEventListener('click', (e) => handleVideoTap(e.clientX, e.clientY));
 
 cameraBtn.addEventListener('click', () => {
   if (cameraPanel.classList.contains('active')) {
